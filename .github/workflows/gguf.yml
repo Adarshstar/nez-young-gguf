@@ -1,0 +1,27 @@
+name: convert-to-gguf
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch: {}
+
+jobs:
+  convert:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install deps
+        run: pip install numpy gguf
+      - name: Check inputs present
+        run: |
+          test -f nez_young_best.pt || { echo "::error::nez_young_best.pt not found in repo root - upload it first"; exit 1; }
+          test -f tokenizer.json || { echo "::error::tokenizer.json not found in repo root - upload it first"; exit 1; }
+      - name: Convert to GGUF
+        run: python to_gguf_termux.py
+      - name: Upload result
+        uses: actions/upload-artifact@v4
+        with:
+          name: nez_young_best-gguf
+          path: nez_young_best.gguf
