@@ -99,6 +99,45 @@ def load_checkpoint(path):
     return state_dict, data["config"]
 
 
+# llama.cpp's GPT-2 tensor loader (src/models/gpt2.cpp) creates every one of
+# these bias tensors unconditionally (not TENSOR_NOT_REQUIRED) - unlike LLAMA
+# arch, GPT2 has no optional-bias path. This checkpoint was trained with
+# bias=False (see config), so none of these exist in the state_dict. Without
+# them llama.cpp throws "tensor '...bias' not found" and refuses to load the
+# model at all (this is the "Failed to load model" error in PocketPal/Anvil).
+# Fix: synthesize zero-filled bias tensors - mathematically identical to
+# "no bias" (adding zero changes nothing) but satisfies the loader.
+BIAS_TENSOR_NAMES = [
+    "attn_norm.bias",
+    "attn_qkv.bias",
+    "attn_output.bias",
+    "ffn_norm.bias",
+    "ffn_up.bias",
+    "ffn_down.bias",
+]
+
+
+def add_zero_biases(writer, n_layer, n_embd, n_ff):
+    sizes = {
+        "attn_norm.bias": n_embd,
+        "attn_qkv.bias": 3 * n_embd,
+        "attn_output.bias": n_embd,
+        "ffn_norm.bias": n_embd,
+        "ffn_up.bias": n_ff,
+        "ffn_down.bias": n_embd,
+    }
+    for idx in range(n_layer):
+        for rest in BIAS_TENSOR_NAMES:
+            name = f"blk.{idx}.{rest}"
+            zeros = np.zeros(sizes[rest], dtype=np.float32)
+            print(f"  {'(synthesized)':35s} {str([sizes[rest]]):14s} -> {name}")
+            writer.add_tensor(name, zeros)
+    # global output norm bias (required alongside output_norm.weight)
+    zeros = np.zeros(n_embd, dtype=np.float32)
+    print(f"  {'(synthesized)':35s} {str([n_embd]):14s} -> output_norm.bias")
+    writer.add_tensor("output_norm.bias", zeros)
+
+
 def map_tensor_name(key: str):
     if key == "transformer.wte.weight":
         return "token_embd.weight"
@@ -109,7 +148,7 @@ def map_tensor_name(key: str):
     if key == "lm_head.weight":
         return "output.weight"
 
-    m = re.match(r"transformer\.h\.(\d+)\.(.+)", key)
+    m = re.match("transformer\.h\.(\d+)\.(.+)", key)
     if not m:
         return None
     idx, rest = m.group(1), m.group(2)
@@ -175,6 +214,10 @@ def main():
 
     if skipped:
         print("Skipped (not weights, expected):", skipped)
+
+    # this checkpoint was trained with bias=False, but llama.cpp's GPT-2
+    # loader requires bias tensors to exist - see add_zero_biases() above.
+    add_zero_biases(writer, n_layer, n_embd, 4 * n_embd)
 
     writer.write_header_to_file()
     writer.write_kv_data_to_file()
