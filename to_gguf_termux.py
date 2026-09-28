@@ -196,15 +196,41 @@ def main():
     writer.add_layer_norm_eps(1e-5)
     writer.add_file_type(0)  # 0 = F32
 
+    # GPT-2 BPE in llama.cpp maps raw bytes through bytes_to_unicode before
+    # lookup. Literal space (0x20) and some controls are NOT identity-mapped,
+    # so storing raw " " as a token makes the encoder emit UNK_BYTE_0x20.
+    # Store every vocab char in the same unicode form the encoder looks up.
+    def bytes_to_unicode():
+        bs = (
+            list(range(ord("!"), ord("~") + 1))
+            + list(range(ord("¡"), ord("¬") + 1))
+            + list(range(ord("®"), ord("ÿ") + 1))
+        )
+        cs = bs[:]
+        n = 0
+        for b in range(2 ** 8):
+            if b not in bs:
+                bs.append(b)
+                cs.append(2 ** 8 + n)
+                n += 1
+        return dict(zip(bs, [chr(c) for c in cs]))
+
+    b2u = bytes_to_unicode()
+
+    def gpt2_token(ch: str) -> str:
+        return "".join(b2u[b] for b in ch.encode("utf-8"))
+
+    gpt2_tokens = [gpt2_token(c) for c in chars]
+    # sanity: space must not stay as literal " "
+    space_tok = gpt2_tokens[chars.index(" ")]
+    assert space_tok != " ", repr(space_tok)
+
     writer.add_tokenizer_model("gpt2")
-    writer.add_token_list(chars)
-    writer.add_token_types([1] * len(chars))
-    # gguf library silently skips empty arrays, so an empty merges list
-    # never writes the key. llama.cpp GPT-2 loader then fails with
-    # "cannot find tokenizer merges". Add one placeholder merge between
-    # two control bytes that never appear in this character-level vocab
-    # or in generated text (chars only contain printable + a few controls).
-    writer.add_token_merges(["\x00 \x01"])
+    writer.add_token_list(gpt2_tokens)
+    writer.add_token_types([1] * len(gpt2_tokens))
+    # gguf skips empty arrays; keep a real-looking merge so the key is written.
+    # Prefer a pair that cannot appear in normal text from this vocab.
+    writer.add_token_merges([gpt2_token("\x00") + " " + gpt2_token("\x01")])
     writer.add_bos_token_id(0)
     writer.add_eos_token_id(0)
 
