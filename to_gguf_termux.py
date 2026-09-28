@@ -199,7 +199,12 @@ def main():
     writer.add_tokenizer_model("gpt2")
     writer.add_token_list(chars)
     writer.add_token_types([1] * len(chars))
-    writer.add_token_merges([])
+    # gguf library silently skips empty arrays, so an empty merges list
+    # never writes the key. llama.cpp GPT-2 loader then fails with
+    # "cannot find tokenizer merges". Add one placeholder merge between
+    # two control bytes that never appear in this character-level vocab
+    # or in generated text (chars only contain printable + a few controls).
+    writer.add_token_merges(["\x00 \x01"])
     writer.add_bos_token_id(0)
     writer.add_eos_token_id(0)
 
