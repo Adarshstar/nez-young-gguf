@@ -5,23 +5,76 @@ on:
   workflow_dispatch: {}
 
 jobs:
-  convert:
+  convert-and-run:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: Install deps
+
+      - name: Install conversion deps
         run: pip install numpy gguf
+
       - name: Check inputs present
         run: |
           test -f nez_young_best.pt || { echo "::error::nez_young_best.pt not found in repo root - upload it first"; exit 1; }
           test -f tokenizer.json || { echo "::error::tokenizer.json not found in repo root - upload it first"; exit 1; }
+
       - name: Convert to GGUF
         run: python to_gguf_termux.py
-      - name: Upload result
+
+      - name: Upload GGUF artifact
         uses: actions/upload-artifact@v4
         with:
           name: nez_young_best-gguf
           path: nez_young_best.gguf
+
+      # --- Run / load test ---
+      - name: Install llama-cpp-python
+        run: pip install llama-cpp-python --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu
+
+      - name: Load model and generate
+        run: |
+          python << 'PY'
+          import sys
+          from llama_cpp import Llama
+
+          print("Loading nez_young_best.gguf ...")
+          try:
+              llm = Llama(
+                  model_path="nez_young_best.gguf",
+                  n_ctx=256,
+                  n_threads=2,
+                  verbose=True,
+              )
+          except Exception as e:
+              print("FAILED TO LOAD MODEL:", e)
+              sys.exit(1)
+
+          print("\n=== Model loaded successfully ===")
+          print(f"n_vocab={llm.n_vocab()}, n_ctx={llm.n_ctx()}, n_embd={llm.n_embd()}")
+
+          prompt = "Once upon a time"
+          print(f"\nPrompt: {prompt!r}")
+          print("--- generation ---")
+          try:
+              out = llm(
+                  prompt,
+                  max_tokens=64,
+                  temperature=0.8,
+                  top_p=0.95,
+                  echo=True,
+              )
+              text = out["choices"][0]["text"]
+              print(text)
+              print("--- end ---")
+              if not text or len(text.strip()) < len(prompt):
+                  print("WARNING: generation produced little/no text")
+                  sys.exit(1)
+              print("\nSUCCESS: model loaded and generated text")
+          except Exception as e:
+              print("FAILED DURING GENERATION:", e)
+              sys.exit(1)
+          PY
